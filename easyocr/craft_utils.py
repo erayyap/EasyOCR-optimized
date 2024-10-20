@@ -1,27 +1,81 @@
-"""  
-Copyright (c) 2019-present NAVER Corp.
-MIT License
-"""
-
 # -*- coding: utf-8 -*-
 import numpy as np
 import cv2
 import math
 from scipy.ndimage import label
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 
 """ auxiliary functions """
-# unwarp corodinates
+# unwarp coordinates
 def warpCoord(Minv, pt):
     out = np.matmul(Minv, (pt[0], pt[1], 1))
     return np.array([out[0]/out[2], out[1]/out[2]])
 """ end of auxiliary functions """
 
+def process_label_range(label_range, labels, stats, text_threshold, estimate_num_chars, img_h, img_w, and_map, textmap=None, linkmap=None):
+    det = []
+    mapper = []
+    for k in label_range:
+        # make segmentation map
+        segmap = np.zeros((img_h, img_w), dtype=np.uint8)
+        segmap[labels == k] = 255
 
-def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text, estimate_num_chars=False):
+        mapper_entry = None
+        if estimate_num_chars:
+            # We need textmap and linkmap for this computation
+            _, character_locs = cv2.threshold((textmap - linkmap) * segmap / 255., text_threshold, 1, 0)
+            _, n_chars = label(character_locs)
+            mapper_entry = n_chars
+        else:
+            mapper_entry = k
+
+        # Remove link area
+        segmap[and_map] = 0   # Use precomputed and_map
+
+        x, y = stats[k, cv2.CC_STAT_LEFT], stats[k, cv2.CC_STAT_TOP]
+        w, h = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
+        size = stats[k, cv2.CC_STAT_AREA]
+        niter = int(math.sqrt(size * min(w, h) / (w * h)) * 2)
+        sx, ex, sy, ey = x - niter, x + w + niter + 1, y - niter, y + h + niter + 1
+        # boundary check
+        sx = max(sx, 0)
+        sy = max(sy, 0)
+        ex = min(ex, img_w)
+        ey = min(ey, img_h)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1 + niter, 1 + niter))
+        segmap[sy:ey, sx:ex] = cv2.dilate(segmap[sy:ey, sx:ex], kernel)
+
+        # make box
+        np_contours = np.roll(np.array(np.where(segmap != 0)), 1, axis=0).transpose().reshape(-1, 2)
+        if len(np_contours) == 0:
+            continue
+        rectangle = cv2.minAreaRect(np_contours)
+        box = cv2.boxPoints(rectangle)
+
+        # align diamond-shape
+        w_box, h_box = np.linalg.norm(box[0] - box[1]), np.linalg.norm(box[1] - box[2])
+        box_ratio = max(w_box, h_box) / (min(w_box, h_box) + 1e-5)
+        if abs(1 - box_ratio) <= 0.1:
+            l, r = min(np_contours[:, 0]), max(np_contours[:, 0])
+            t, b = min(np_contours[:, 1]), max(np_contours[:, 1])
+            box = np.array([[l, t], [r, t], [r, b], [l, b]], dtype=np.float32)
+
+        # make clockwise order
+        startidx = box.sum(axis=1).argmin()
+        box = np.roll(box, 4 - startidx, 0)
+        box = np.array(box)
+
+        det.append(box)
+        mapper.append(mapper_entry)
+    return det, mapper
+
+def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text, estimate_num_chars=False, num_workers=2):
     # prepare data
     linkmap = linkmap.copy()
     textmap = textmap.copy()
     img_h, img_w = textmap.shape
+    print(len(textmap),  " ", len(textmap[0]))
 
     """ labeling method """
     ret, text_score = cv2.threshold(textmap, low_text, 1, 0)
@@ -29,58 +83,69 @@ def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text,
 
     text_score_comb = np.clip(text_score + link_score, 0, 1)
     nLabels, labels, stats, centroids = cv2.connectedComponentsWithStats(text_score_comb.astype(np.uint8), connectivity=4)
-
     det = []
     mapper = []
-    for k in range(1,nLabels):
-        # size filtering
+
+    # Filter labels based on size and threshold
+    valid_labels = []
+    for k in range(1, nLabels):
         size = stats[k, cv2.CC_STAT_AREA]
-        if size < 10: continue
+        if size < 10:
+            continue
+        if np.max(textmap[labels == k]) < text_threshold:
+            continue
+        valid_labels.append(k)
 
-        # thresholding
-        if np.max(textmap[labels==k]) < text_threshold: continue
+    # Precompute and_map
+    and_map = np.logical_and(linkmap == 1, textmap == 0)
 
-        # make segmentation map
-        segmap = np.zeros(textmap.shape, dtype=np.uint8)
-        segmap[labels==k] = 255
-        if estimate_num_chars:
-            _, character_locs = cv2.threshold((textmap - linkmap) * segmap /255., text_threshold, 1, 0)
-            _, n_chars = label(character_locs)
-            mapper.append(n_chars)
-        else:
-            mapper.append(k)
-        segmap[np.logical_and(link_score==1, text_score==0)] = 0   # remove link area
-        x, y = stats[k, cv2.CC_STAT_LEFT], stats[k, cv2.CC_STAT_TOP]
-        w, h = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
-        niter = int(math.sqrt(size * min(w, h) / (w * h)) * 2)
-        sx, ex, sy, ey = x - niter, x + w + niter + 1, y - niter, y + h + niter + 1
-        # boundary check
-        if sx < 0 : sx = 0
-        if sy < 0 : sy = 0
-        if ex >= img_w: ex = img_w
-        if ey >= img_h: ey = img_h
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(1 + niter, 1 + niter))
-        segmap[sy:ey, sx:ex] = cv2.dilate(segmap[sy:ey, sx:ex], kernel)
+    # Create label ranges
+    label_indices = valid_labels
+    while True:
+        chunk_size = max(1, math.ceil(len(label_indices) / num_workers))
 
-        # make box
-        np_contours = np.roll(np.array(np.where(segmap!=0)),1,axis=0).transpose().reshape(-1,2)
-        rectangle = cv2.minAreaRect(np_contours)
-        box = cv2.boxPoints(rectangle)
+        if chunk_size >= 2:
+            break
+        num_workers = num_workers / 2
+    if chunk_size <= 2:
+        num_workers = 1
+    label_chunks = [label_indices[i:i + chunk_size] for i in range(0, len(label_indices), chunk_size)]
 
-        # align diamond-shape
-        w, h = np.linalg.norm(box[0] - box[1]), np.linalg.norm(box[1] - box[2])
-        box_ratio = max(w, h) / (min(w, h) + 1e-5)
-        if abs(1 - box_ratio) <= 0.1:
-            l, r = min(np_contours[:,0]), max(np_contours[:,0])
-            t, b = min(np_contours[:,1]), max(np_contours[:,1])
-            box = np.array([[l, t], [r, t], [r, b], [l, b]], dtype=np.float32)
+    # Define partial function with fixed parameters except label_range
+    if estimate_num_chars:
+        worker = partial(
+            process_label_range,
+            labels=labels,
+            stats=stats,
+            text_threshold=text_threshold,
+            estimate_num_chars=estimate_num_chars,
+            img_h=img_h,
+            img_w=img_w,
+            and_map=and_map,
+            textmap=textmap,
+            linkmap=linkmap
+        )
+    else:
+        worker = partial(
+            process_label_range,
+            labels=labels,
+            stats=stats,
+            text_threshold=text_threshold,
+            estimate_num_chars=estimate_num_chars,
+            img_h=img_h,
+            img_w=img_w,
+            and_map=and_map
+        )
 
-        # make clock-wise order
-        startidx = box.sum(axis=1).argmin()
-        box = np.roll(box, 4-startidx, 0)
-        box = np.array(box)
-
-        det.append(box)
+    # Use ProcessPoolExecutor for parallel processing
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all label range processing tasks
+        futures = {executor.submit(worker, chunk): chunk for chunk in label_chunks}
+        
+        for future in as_completed(futures):
+            chunk_det, chunk_mapper = future.result()
+            det.extend(chunk_det)
+            mapper.extend(chunk_mapper)
 
     return det, labels, mapper
 
@@ -230,10 +295,13 @@ def getPoly_core(boxes, labels, mapper, linkmap):
 
     return polys
 
-def getDetBoxes(textmap, linkmap, text_threshold, link_threshold, low_text, poly=False, estimate_num_chars=False):
+def getDetBoxes(textmap, linkmap, text_threshold, link_threshold, low_text, poly=False, estimate_num_chars=False, num_workers=2):
     if poly and estimate_num_chars:
         raise Exception("Estimating the number of characters not currently supported with poly.")
-    boxes, labels, mapper = getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text, estimate_num_chars)
+    boxes, labels, mapper = getDetBoxes_core(
+        textmap, linkmap, text_threshold, link_threshold, low_text, 
+        estimate_num_chars, num_workers
+    )
 
     if poly:
         polys = getPoly_core(boxes, labels, mapper, linkmap)

@@ -33,7 +33,8 @@ class Reader(object):
                  user_network_directory=None, detect_network="craft", 
                  recog_network='standard', download_enabled=True, 
                  detector=True, recognizer=True, verbose=True, 
-                 quantize=True, cudnn_benchmark=False):
+                 quantize=True, cudnn_benchmark=False,
+                 compile="none"):
         """Create an EasyOCR Reader
 
         Parameters:
@@ -53,6 +54,7 @@ class Reader(object):
         """
         self.verbose = verbose
         self.download_enabled = download_enabled
+        self.compile = compile
 
         self.model_storage_directory = MODULE_PATH + '/model'
         if model_storage_directory:
@@ -230,7 +232,8 @@ class Reader(object):
                 network_params = recog_config['network_params']
             self.recognizer, self.converter = get_recognizer(recog_network, network_params,\
                                                          self.character, separator_list,\
-                                                         dict_list, model_path, device = self.device, quantize=quantize)
+                                                         dict_list, model_path, device = self.device, quantize=quantize,
+                                                         compile = self.compile)
 
     def getDetectorPath(self, detect_network):
         if detect_network in self.support_detection_network:
@@ -271,7 +274,8 @@ class Reader(object):
         return self.get_detector(detector_path, 
                                  device = self.device, 
                                  quantize = self.quantize, 
-                                 cudnn_benchmark = self.cudnn_benchmark
+                                 cudnn_benchmark = self.cudnn_benchmark,
+                                 compile = self.compile
                                  )
     
     def setDetector(self, detect_network):
@@ -313,6 +317,7 @@ class Reader(object):
                slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                width_ths = 0.5, add_margin = 0.1, reformat=True, optimal_num_chars=None,
                threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
+               craft_workers = 2
                ):
 
         if reformat:
@@ -332,6 +337,7 @@ class Reader(object):
                                     bbox_min_score = bbox_min_score, 
                                     bbox_min_size = bbox_min_size, 
                                     max_candidates = max_candidates,
+                                    craft_workers = 2
                                     )
 
         horizontal_list_agg, free_list_agg = [], []
@@ -446,7 +452,7 @@ class Reader(object):
                  slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                  width_ths = 0.5, y_ths = 0.5, x_ths = 1.0, add_margin = 0.1, 
                  threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
-                 output_format='standard'):
+                 output_format='standard', craft_workers = 2):
         '''
         Parameters:
         image: file path or numpy-array or a byte stream object
@@ -461,7 +467,8 @@ class Reader(object):
                                                  height_ths = height_ths, width_ths= width_ths,\
                                                  add_margin = add_margin, reformat = False,\
                                                  threshold = threshold, bbox_min_score = bbox_min_score,\
-                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates
+                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates,
+                                                 craft_workers = 2
                                                  )
         # get the 1st result from hor & free list as self.detect returns a list of depth 3
         horizontal_list, free_list = horizontal_list[0], free_list[0]
@@ -482,7 +489,7 @@ class Reader(object):
                  slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                  width_ths = 0.5, y_ths = 0.5, x_ths = 1.0, add_margin = 0.1, 
                  threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
-                 output_format='standard'):
+                 output_format='standard', craft_workers = 2):
         '''
         Parameters:
         image: file path or numpy-array or a byte stream object
@@ -497,7 +504,8 @@ class Reader(object):
                                                  height_ths = height_ths, width_ths= width_ths,\
                                                  add_margin = add_margin, reformat = False,\
                                                  threshold = threshold, bbox_min_score = bbox_min_score,\
-                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates
+                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates,
+                                                 craft_workers = 2
                                                  )
         # get the 1st result from hor & free list as self.detect returns a list of depth 3
         horizontal_list, free_list = horizontal_list[0], free_list[0]
@@ -545,7 +553,7 @@ class Reader(object):
                          slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                          width_ths = 0.5, y_ths = 0.5, x_ths = 1.0, add_margin = 0.1, 
                          threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
-                         output_format='standard'):
+                         output_format='standard', craft_workers = 2):
         '''
         Parameters:
         image: file path or numpy-array or a byte stream object
@@ -564,7 +572,8 @@ class Reader(object):
                                                  height_ths = height_ths, width_ths= width_ths,\
                                                  add_margin = add_margin, reformat = False,\
                                                  threshold = threshold, bbox_min_score = bbox_min_score,\
-                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates
+                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates,
+                                                 craft_workers = 2
                                                  )
         result_agg = []
         # put img_cv_grey in a list if its a single img

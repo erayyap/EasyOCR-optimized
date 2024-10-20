@@ -21,7 +21,8 @@ def copyStateDict(state_dict):
         new_state_dict[name] = v
     return new_state_dict
 
-def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold, low_text, poly, device, estimate_num_chars=False):
+def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold, low_text, poly, device, estimate_num_chars=False,
+            craft_workers = 2):
     if isinstance(image, np.ndarray) and len(image.shape) == 4:  # image is batch of np arrays
         image_arrs = image
     else:                                                        # image is single numpy array
@@ -53,7 +54,7 @@ def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold,
 
         # Post-processing
         boxes, polys, mapper = getDetBoxes(
-            score_text, score_link, text_threshold, link_threshold, low_text, poly, estimate_num_chars)
+            score_text, score_link, text_threshold, link_threshold, low_text, poly, estimate_num_chars, num_workers = craft_workers)
 
         # coordinate adjustment
         boxes = adjustResultCoordinates(boxes, ratio_w, ratio_h)
@@ -71,7 +72,7 @@ def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold,
 
     return boxes_list, polys_list
 
-def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=False):
+def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=False, compile = "none"):
     net = CRAFT()
 
     if device == 'cpu':
@@ -87,15 +88,27 @@ def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=Fal
         cudnn.benchmark = cudnn_benchmark
 
     net.eval()
+    if compile != "none":
+        if compile == "torch_tensorrt":
+            import torch_tensorrt
+            net = torch.compile(net, backend="torch_tensorrt",  dynamic = False,
+                                options={"truncate_long_and_double": True,
+                                         "precision": torch.half,
+                                         "min_block_size": 103,
+                                        #"torch_executed_ops": {"torch.ops.aten.sub.Tensor"},
+                                         "optimization_level": 5,})
+        elif compile == "default":
+            net = torch.compile(net, mode = "reduce-overhead")
     return net
 
-def get_textbox(detector, image, canvas_size, mag_ratio, text_threshold, link_threshold, low_text, poly, device, optimal_num_chars=None, **kwargs):
+def get_textbox(detector, image, canvas_size, mag_ratio, text_threshold, link_threshold, low_text, poly, 
+                device, optimal_num_chars=None, craft_workers = 2, **kwargs):
     result = []
     estimate_num_chars = optimal_num_chars is not None
     bboxes_list, polys_list = test_net(canvas_size, mag_ratio, detector,
                                        image, text_threshold,
                                        link_threshold, low_text, poly,
-                                       device, estimate_num_chars)
+                                       device, estimate_num_chars, craft_workers)
     if estimate_num_chars:
         polys_list = [[p for p, _ in sorted(polys, key=lambda x: abs(optimal_num_chars - x[1]))]
                       for polys in polys_list]

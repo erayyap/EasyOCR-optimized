@@ -152,7 +152,7 @@ def recognizer_predict(model, converter, test_loader, batch_max_length,\
 
 def get_recognizer(recog_network, network_params, character,\
                    separator_list, dict_list, model_path,\
-                   device = 'cpu', quantize = True):
+                   device = 'cpu', quantize = True, compile = "none"):
 
     converter = CTCLabelConverter(character, separator_list, dict_list)
     num_class = len(converter.character)
@@ -180,6 +180,18 @@ def get_recognizer(recog_network, network_params, character,\
     else:
         model = torch.nn.DataParallel(model).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+
+    if compile != "none":
+        if compile == "torch_tensorrt":
+            import torch_tensorrt
+            model = torch.compile(model, backend="torch_tensorrt",  dynamic = False,
+                                options={"truncate_long_and_double": True,
+                                         "precision": torch.half,
+                                         "min_block_size": 3,
+                                        #"torch_executed_ops": {"torch.ops.aten.sub.Tensor"},
+                                         "optimization_level": 5,})
+        elif compile == "default":
+            model = torch.compile(model, mode = "reduce-overhead")
 
     return model, converter
 
