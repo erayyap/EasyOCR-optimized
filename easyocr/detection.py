@@ -27,7 +27,7 @@ def copyStateDict(state_dict):
     return new_state_dict
 
 def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold, low_text, poly, device, estimate_num_chars=False,
-            craft_workers = 2, compile = "none", quantize = True, detection_lock = False):
+            craft_workers = 1, compile = "none", quantize = True, detection_lock = False):
     if isinstance(image, np.ndarray) and len(image.shape) == 4:  # image is batch of np arrays
         image_arrs = image
     else:                                                        # image is single numpy array
