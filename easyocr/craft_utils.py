@@ -2,7 +2,7 @@
 import numpy as np
 import cv2
 import math
-from scipy.ndimage import label
+import scipy.ndimage as ndi
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 
@@ -17,43 +17,56 @@ def process_label_range(label_range, labels, stats, text_threshold, estimate_num
     det = []
     mapper = []
     for k in label_range:
-        # make segmentation map
-        segmap = np.zeros((img_h, img_w), dtype=np.uint8)
-        segmap[labels == k] = 255
+        x, y = stats[k, cv2.CC_STAT_LEFT], stats[k, cv2.CC_STAT_TOP]
+        w, h = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
+        size = stats[k, cv2.CC_STAT_AREA]
+
+        niter = int(math.sqrt(size * min(w, h) / (w * h)) * 2)
+
+        # Compute expanded bounding box
+        sx = max(x - niter, 0)
+        sy = max(y - niter, 0)
+        ex = min(x + w + niter + 1, img_w)
+        ey = min(y + h + niter + 1, img_h)
+
+        # Extract local labels and create segmap
+        labels_roi = labels[sy:ey, sx:ex]
+        label_mask = labels_roi == k
+        segmap = np.zeros((ey - sy, ex - sx), dtype=np.uint8)
+        segmap[label_mask] = 255
 
         mapper_entry = None
         if estimate_num_chars:
-            # We need textmap and linkmap for this computation
-            _, character_locs = cv2.threshold((textmap - linkmap) * segmap / 255., text_threshold, 1, 0)
-            _, n_chars = label(character_locs)
+            # Extract textmap and linkmap regions
+            textmap_roi = textmap[sy:ey, sx:ex]
+            linkmap_roi = linkmap[sy:ey, sx:ex]
+            temp = (textmap_roi - linkmap_roi) * segmap / 255.
+            _, character_locs = cv2.threshold(temp, text_threshold, 1, 0)
+            _, n_chars = ndi.label(character_locs)
             mapper_entry = n_chars
         else:
             mapper_entry = k
 
         # Remove link area
-        segmap[and_map] = 0   # Use precomputed and_map
+        and_map_roi = and_map[sy:ey, sx:ex]
+        segmap[and_map_roi] = 0
 
-        x, y = stats[k, cv2.CC_STAT_LEFT], stats[k, cv2.CC_STAT_TOP]
-        w, h = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
-        size = stats[k, cv2.CC_STAT_AREA]
-        niter = int(math.sqrt(size * min(w, h) / (w * h)) * 2)
-        sx, ex, sy, ey = x - niter, x + w + niter + 1, y - niter, y + h + niter + 1
-        # boundary check
-        sx = max(sx, 0)
-        sy = max(sy, 0)
-        ex = min(ex, img_w)
-        ey = min(ey, img_h)
+        # Dilate segmap
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1 + niter, 1 + niter))
-        segmap[sy:ey, sx:ex] = cv2.dilate(segmap[sy:ey, sx:ex], kernel)
+        segmap = cv2.dilate(segmap, kernel)
 
-        # make box
-        np_contours = np.roll(np.array(np.where(segmap != 0)), 1, axis=0).transpose().reshape(-1, 2)
-        if len(np_contours) == 0:
+        # Get contours
+        np_contours = cv2.findNonZero(segmap)
+        if np_contours is None:
             continue
+        np_contours = np_contours.reshape(-1, 2)
+        # Adjust contours to original image coordinates
+        np_contours += np.array([sx, sy])
+
         rectangle = cv2.minAreaRect(np_contours)
         box = cv2.boxPoints(rectangle)
 
-        # align diamond-shape
+        # Align diamond-shape
         w_box, h_box = np.linalg.norm(box[0] - box[1]), np.linalg.norm(box[1] - box[2])
         box_ratio = max(w_box, h_box) / (min(w_box, h_box) + 1e-5)
         if abs(1 - box_ratio) <= 0.1:
@@ -61,7 +74,7 @@ def process_label_range(label_range, labels, stats, text_threshold, estimate_num
             t, b = min(np_contours[:, 1]), max(np_contours[:, 1])
             box = np.array([[l, t], [r, t], [r, b], [l, b]], dtype=np.float32)
 
-        # make clockwise order
+        # Make clockwise order
         startidx = box.sum(axis=1).argmin()
         box = np.roll(box, 4 - startidx, 0)
         box = np.array(box)
@@ -75,7 +88,6 @@ def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text,
     linkmap = linkmap.copy()
     textmap = textmap.copy()
     img_h, img_w = textmap.shape
-    print(len(textmap),  " ", len(textmap[0]))
 
     """ labeling method """
     ret, text_score = cv2.threshold(textmap, low_text, 1, 0)
@@ -85,57 +97,90 @@ def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text,
     nLabels, labels, stats, centroids = cv2.connectedComponentsWithStats(text_score_comb.astype(np.uint8), connectivity=4)
     det = []
     mapper = []
-
     # Filter labels based on size and threshold
+    valid_labels = []
+    label_maxes = ndi.maximum(textmap, labels, index=range(nLabels))
+
     valid_labels = []
     for k in range(1, nLabels):
         size = stats[k, cv2.CC_STAT_AREA]
         if size < 10:
             continue
-        if np.max(textmap[labels == k]) < text_threshold:
+        if label_maxes[k] < text_threshold:
             continue
         valid_labels.append(k)
 
-    # Precompute and_map
+    # Compute and map preprocessing
     and_map = np.logical_and(linkmap == 1, textmap == 0)
-
     # Create label ranges
     label_indices = valid_labels
-    while True:
+    while num_workers >= 1:
         chunk_size = max(1, math.ceil(len(label_indices) / num_workers))
-
-        if chunk_size >= 2:
+        if len(label_indices) <= 20:
+            num_workers = 1
             break
-        num_workers = num_workers / 2
+        if chunk_size >= 4:
+            break
+        num_workers = math.ceil(num_workers / 2)
     if chunk_size <= 2:
         num_workers = 1
     label_chunks = [label_indices[i:i + chunk_size] for i in range(0, len(label_indices), chunk_size)]
 
     # Define partial function with fixed parameters except label_range
     if estimate_num_chars:
-        worker = partial(
-            process_label_range,
-            labels=labels,
-            stats=stats,
-            text_threshold=text_threshold,
-            estimate_num_chars=estimate_num_chars,
-            img_h=img_h,
-            img_w=img_w,
-            and_map=and_map,
-            textmap=textmap,
-            linkmap=linkmap
-        )
+        if num_workers != 1:
+            worker = partial(
+                process_label_range,
+                labels=labels,
+                stats=stats,
+                text_threshold=text_threshold,
+                estimate_num_chars=estimate_num_chars,
+                img_h=img_h,
+                img_w=img_w,
+                and_map=and_map,
+                textmap=textmap,
+                linkmap=linkmap
+            )
+        else:
+            # Directly process and return the result without using worker
+            det, mapper = process_label_range(
+                label_range=valid_labels,
+                labels=labels,
+                stats=stats,
+                text_threshold=text_threshold,
+                estimate_num_chars=estimate_num_chars,
+                img_h=img_h,
+                img_w=img_w,
+                and_map=and_map,
+                textmap=textmap,
+                linkmap=linkmap
+            )
+            return det, labels, mapper
     else:
-        worker = partial(
-            process_label_range,
-            labels=labels,
-            stats=stats,
-            text_threshold=text_threshold,
-            estimate_num_chars=estimate_num_chars,
-            img_h=img_h,
-            img_w=img_w,
-            and_map=and_map
-        )
+        if num_workers != 1:
+            worker = partial(
+                process_label_range,
+                labels=labels,
+                stats=stats,
+                text_threshold=text_threshold,
+                estimate_num_chars=estimate_num_chars,
+                img_h=img_h,
+                img_w=img_w,
+                and_map=and_map
+            )
+        else:
+            # Directly process and return the result without using worker
+            det, mapper = process_label_range(
+                label_range=valid_labels,
+                labels=labels,
+                stats=stats,
+                text_threshold=text_threshold,
+                estimate_num_chars=estimate_num_chars,
+                img_h=img_h,
+                img_w=img_w,
+                and_map=and_map
+            )
+            return det, labels, mapper
 
     # Use ProcessPoolExecutor for parallel processing
     with ProcessPoolExecutor(max_workers=num_workers) as executor:

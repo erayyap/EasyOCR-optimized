@@ -102,7 +102,7 @@ def test_net(image,
 
     return bboxes, polys
 
-def get_detector(trained_model, backbone = 'resnet18', device='cpu', quantize=True, cudnn_benchmark=False):
+def get_detector(trained_model, backbone = 'resnet18', device='cpu', quantize=True, cudnn_benchmark=False, compile = "none"):
     '''
     A wrapper to initialize DBNet text detection model
 
@@ -155,6 +155,10 @@ def get_textbox(detector,
                 bbox_min_size = 3, 
                 max_candidates = 0,
                 device = 'cpu',
+                craft_workers = 2,
+                compile = "none",
+                quantize = True,
+                detection_lock = False,
                 **kwargs
                 ):
     '''

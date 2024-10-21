@@ -9,6 +9,11 @@ import numpy as np
 from .craft_utils import getDetBoxes, adjustResultCoordinates
 from .imgproc import resize_aspect_ratio, normalizeMeanVariance
 from .craft import CRAFT
+import threading
+from contextlib import nullcontext
+
+thread_detection_lock = threading.Lock()
+
 
 def copyStateDict(state_dict):
     if list(state_dict.keys())[0].startswith("module"):
@@ -22,7 +27,7 @@ def copyStateDict(state_dict):
     return new_state_dict
 
 def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold, low_text, poly, device, estimate_num_chars=False,
-            craft_workers = 2):
+            craft_workers = 2, compile = "none", quantize = True, detection_lock = False):
     if isinstance(image, np.ndarray) and len(image.shape) == 4:  # image is batch of np arrays
         image_arrs = image
     else:                                                        # image is single numpy array
@@ -41,11 +46,23 @@ def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold,
          for n_img in img_resized_list]
     x = torch.from_numpy(np.array(x))
     x = x.to(device)
-
     # forward pass
-    with torch.no_grad():
-        y, feature = net(x)
+    #check inference mode
+    global thread_detection_lock
+    with thread_detection_lock if detection_lock else nullcontext():
+        if compile != "onnx":
+                with torch.amp.autocast(device_type=device) if quantize else nullcontext():
+                    y, feature = net(x)
+        else:
+                x = x.to("cpu").numpy()
+                #inputs = {net.get_inputs()[0].name: x}
+                y, feature = net.run(None, {"l_x_": x})
 
+    del x #?????
+    if compile == "onnx":
+        y = torch.from_numpy(y).to("cpu").float()
+    else:
+        y = y.to("cpu").float()
     boxes_list, polys_list = [], []
     for out in y:
         # make score and link map
@@ -73,7 +90,8 @@ def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold,
     return boxes_list, polys_list
 
 def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=False, compile = "none"):
-    net = CRAFT()
+    #net = CRAFT(pretrained=True,freeze=False)
+    net = CRAFT(pretrained=True,freeze=False).half()
 
     if device == 'cpu':
         net.load_state_dict(copyStateDict(torch.load(trained_model, map_location=device, weights_only=False)))
@@ -84,9 +102,8 @@ def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=Fal
                 pass
     else:
         net.load_state_dict(copyStateDict(torch.load(trained_model, map_location=device, weights_only=False)))
-        net = torch.nn.DataParallel(net).to(device)
+        net = net.to(device)#torch.nn.DataParallel(net).to(device)
         cudnn.benchmark = cudnn_benchmark
-
     net.eval()
     if compile != "none":
         if compile == "torch_tensorrt":
@@ -99,16 +116,27 @@ def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=Fal
                                          "optimization_level": 5,})
         elif compile == "default":
             net = torch.compile(net, mode = "reduce-overhead")
+        elif compile == "onnx":
+            import onnxruntime
+            torch_input = torch.randn(1, 3, 2560, 1376).to(device)
+            net = torch.onnx.dynamo_export(net, torch_input,
+            export_options=torch.onnx.ExportOptions(
+        dynamic_shapes=True,    ))
+            net = net.model_proto.SerializeToString()
+            net = onnxruntime.InferenceSession(net, providers=['CUDAExecutionProvider'])
+            
     return net
 
 def get_textbox(detector, image, canvas_size, mag_ratio, text_threshold, link_threshold, low_text, poly, 
-                device, optimal_num_chars=None, craft_workers = 2, **kwargs):
+                device, optimal_num_chars=None, craft_workers = 2, compile = "none", quantize = True,
+                 detection_lock = False, **kwargs):
     result = []
     estimate_num_chars = optimal_num_chars is not None
     bboxes_list, polys_list = test_net(canvas_size, mag_ratio, detector,
                                        image, text_threshold,
                                        link_threshold, low_text, poly,
-                                       device, estimate_num_chars, craft_workers)
+                                       device, estimate_num_chars, 
+                                       craft_workers, compile, quantize, detection_lock)
     if estimate_num_chars:
         polys_list = [[p for p, _ in sorted(polys, key=lambda x: abs(optimal_num_chars - x[1]))]
                       for polys in polys_list]

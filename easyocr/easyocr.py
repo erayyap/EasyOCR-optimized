@@ -16,7 +16,6 @@ from PIL import Image
 from logging import getLogger
 import yaml
 import json
-
 if sys.version_info[0] == 2:
     from io import open
     from six.moves.urllib.request import urlretrieve
@@ -34,7 +33,7 @@ class Reader(object):
                  recog_network='standard', download_enabled=True, 
                  detector=True, recognizer=True, verbose=True, 
                  quantize=True, cudnn_benchmark=False,
-                 compile="none"):
+                 compile="none",):
         """Create an EasyOCR Reader
 
         Parameters:
@@ -317,7 +316,7 @@ class Reader(object):
                slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                width_ths = 0.5, add_margin = 0.1, reformat=True, optimal_num_chars=None,
                threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
-               craft_workers = 2
+               craft_workers = 2, detection_lock = False
                ):
 
         if reformat:
@@ -337,7 +336,10 @@ class Reader(object):
                                     bbox_min_score = bbox_min_score, 
                                     bbox_min_size = bbox_min_size, 
                                     max_candidates = max_candidates,
-                                    craft_workers = 2
+                                    craft_workers = craft_workers,
+                                    compile = self.compile,
+                                    quantize = self.quantize,
+                                    detection_lock = detection_lock
                                     )
 
         horizontal_list_agg, free_list_agg = [], []
@@ -452,31 +454,33 @@ class Reader(object):
                  slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                  width_ths = 0.5, y_ths = 0.5, x_ths = 1.0, add_margin = 0.1, 
                  threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
-                 output_format='standard', craft_workers = 2):
+                 output_format='standard', craft_workers = 2, detection_lock = False):
         '''
         Parameters:
         image: file path or numpy-array or a byte stream object
         '''
-        img, img_cv_grey = reformat_input(image)
+        with torch.no_grad():
+            img, img_cv_grey = reformat_input(image)
 
-        horizontal_list, free_list = self.detect(img, 
-                                                 min_size = min_size, text_threshold = text_threshold,\
-                                                 low_text = low_text, link_threshold = link_threshold,\
-                                                 canvas_size = canvas_size, mag_ratio = mag_ratio,\
-                                                 slope_ths = slope_ths, ycenter_ths = ycenter_ths,\
-                                                 height_ths = height_ths, width_ths= width_ths,\
-                                                 add_margin = add_margin, reformat = False,\
-                                                 threshold = threshold, bbox_min_score = bbox_min_score,\
-                                                 bbox_min_size = bbox_min_size, max_candidates = max_candidates,
-                                                 craft_workers = 2
-                                                 )
-        # get the 1st result from hor & free list as self.detect returns a list of depth 3
-        horizontal_list, free_list = horizontal_list[0], free_list[0]
-        result = self.recognize(img_cv_grey, horizontal_list, free_list,\
-                                decoder, beamWidth, batch_size,\
-                                workers, allowlist, blocklist, detail, rotation_info,\
-                                paragraph, contrast_ths, adjust_contrast,\
-                                filter_ths, y_ths, x_ths, False, output_format)
+            horizontal_list, free_list = self.detect(img, 
+                                                    min_size = min_size, text_threshold = text_threshold,\
+                                                    low_text = low_text, link_threshold = link_threshold,\
+                                                    canvas_size = canvas_size, mag_ratio = mag_ratio,\
+                                                    slope_ths = slope_ths, ycenter_ths = ycenter_ths,\
+                                                    height_ths = height_ths, width_ths= width_ths,\
+                                                    add_margin = add_margin, reformat = False,\
+                                                    threshold = threshold, bbox_min_score = bbox_min_score,\
+                                                    bbox_min_size = bbox_min_size, max_candidates = max_candidates,
+                                                    craft_workers = craft_workers, detection_lock = detection_lock
+                                                    )
+            #time.sleep(20)
+            # get the 1st result from hor & free list as self.detect returns a list of depth 3
+            horizontal_list, free_list = horizontal_list[0], free_list[0]
+            result = self.recognize(img_cv_grey, horizontal_list, free_list,\
+                                    decoder, beamWidth, batch_size,\
+                                    workers, allowlist, blocklist, detail, rotation_info,\
+                                    paragraph, contrast_ths, adjust_contrast,\
+                                    filter_ths, y_ths, x_ths, False, output_format)
 
         return result
     
@@ -505,7 +509,7 @@ class Reader(object):
                                                  add_margin = add_margin, reformat = False,\
                                                  threshold = threshold, bbox_min_score = bbox_min_score,\
                                                  bbox_min_size = bbox_min_size, max_candidates = max_candidates,
-                                                 craft_workers = 2
+                                                 craft_workers = craft_workers
                                                  )
         # get the 1st result from hor & free list as self.detect returns a list of depth 3
         horizontal_list, free_list = horizontal_list[0], free_list[0]

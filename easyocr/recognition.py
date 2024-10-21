@@ -9,6 +9,9 @@ from collections import OrderedDict
 import importlib
 from .utils import CTCLabelConverter
 import math
+import threading
+
+recognition_lock = threading.Lock()
 
 def custom_mean(x):
     return x.prod()**(2.0/np.sqrt(len(x)))
@@ -98,18 +101,17 @@ class AlignCollate(object):
 
 def recognizer_predict(model, converter, test_loader, batch_max_length,\
                        ignore_idx, char_group_idx, decoder = 'greedy', beamWidth= 5, device = 'cpu'):
-    model.eval()
     result = []
-    with torch.no_grad():
-        for image_tensors in test_loader:
+    for image_tensors in test_loader:
             batch_size = image_tensors.size(0)
             image = image_tensors.to(device)
             # For max length prediction
             length_for_pred = torch.IntTensor([batch_max_length] * batch_size).to(device)
             text_for_pred = torch.LongTensor(batch_size, batch_max_length + 1).fill_(0).to(device)
 
-            preds = model(image, text_for_pred)
-
+            #with recognition_lock:
+            with torch.amp.autocast(device_type = device):
+                preds = model(image, text_for_pred)
             # Select max probabilty (greedy decoding) then decode index to character
             preds_size = torch.IntTensor([preds.size(1)] * batch_size)
 
@@ -180,6 +182,7 @@ def get_recognizer(recog_network, network_params, character,\
     else:
         model = torch.nn.DataParallel(model).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+        model.eval()
 
     if compile != "none":
         if compile == "torch_tensorrt":
