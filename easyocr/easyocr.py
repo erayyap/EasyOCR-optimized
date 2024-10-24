@@ -39,7 +39,7 @@ class Reader(object):
         Parameters:
             lang_list (list): Language codes (ISO 639) for languages to be recognized during analysis.
 
-            gpu (bool): Enable GPU support (default)
+            gpu (bool|str): Enable GPU support (default) or pass a specific device name like cuda:1
 
             model_storage_directory (string): Path to directory for model data. If not specified,
             models will be read from a directory as defined by the environment variable
@@ -65,21 +65,23 @@ class Reader(object):
             self.user_network_directory = user_network_directory
         Path(self.user_network_directory).mkdir(parents=True, exist_ok=True)
         sys.path.append(self.user_network_directory)
-
-        if gpu is False:
-            self.device = 'cpu'
-            if verbose:
-                LOGGER.warning('Using CPU. Note: This module is much faster with a GPU.')
-        elif gpu is True:
-            if torch.cuda.is_available():
-                self.device = 'cuda'
-            elif torch.backends.mps.is_available():
-                self.device = 'mps'
-            else:
+        if type(gpu) is bool:
+            if gpu is False:
                 self.device = 'cpu'
                 if verbose:
-                    LOGGER.warning('Neither CUDA nor MPS are available - defaulting to CPU. Note: This module is much faster with a GPU.')
-        else:
+                    LOGGER.warning('Using CPU. Note: This module is much faster with a GPU.')
+            elif gpu is True:
+                if torch.cuda.is_available():
+                    self.device = 'cuda'
+                elif torch.backends.mps.is_available():
+                    self.device = 'mps'
+                else:
+                    self.device = 'cpu'
+                    if verbose:
+                        LOGGER.warning('Neither CUDA nor MPS are available - defaulting to CPU. Note: This module is much faster with a GPU.')
+            else:
+                self.device = gpu
+        elif type(gpu) is str:
             self.device = gpu
 
         self.detection_models = detection_models
