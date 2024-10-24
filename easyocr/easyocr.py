@@ -83,6 +83,8 @@ class Reader(object):
                 self.device = gpu
         elif type(gpu) is str:
             self.device = gpu
+        else:
+            self.device = "cpu"
 
         self.detection_models = detection_models
         self.recognition_models = recognition_models
